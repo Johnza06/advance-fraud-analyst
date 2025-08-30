@@ -7,7 +7,7 @@ from langchain.schema import HumanMessage, SystemMessage, AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
 # Providers
-from openai import OpenAI  # Fireworks OpenAI-compatible
+from openai import OpenAI  # Fireworks OpenAI-compatible API
 from huggingface_hub import InferenceClient  # HF Router (provider routing)
 
 load_dotenv()
@@ -23,25 +23,26 @@ def _first_env(*names):
             return v
     return None
 
-# Secrets (your repo secret name included)
+# --- Secrets (your HF repo secret name included) ---
 FIREWORKS_API_KEY = _first_env(
-    "fireworks_api_huggingface",      # your HF repo secret (Fireworks key)
+    "fireworks_api_huggingface",      # your repo secret
     "FIREWORKS_API_HUGGINGFACE",
     "FIREWORKS_API_KEY",
-    "OPENAI_API_KEY"                  # also works if you export FW key here
+    "OPENAI_API_KEY"                  # okay to reuse for FW key if you prefer
 )
 HF_TOKEN = _first_env("HF_TOKEN", "HUGGINGFACE_TOKEN")
 
-# Model IDs for each route
-# Fireworks (direct, OpenAI-compatible): use fully-qualified IDs
-FW_PRIMARY_MODEL   = os.getenv("FW_PRIMARY_MODEL",   "accounts/openai/models/gpt-oss-20b")
+# --- Model IDs ---
+# Fireworks (OpenAI-compatible; MUST use the accounts/fireworks path)
+FW_PRIMARY_MODEL   = os.getenv("FW_PRIMARY_MODEL",   "accounts/fireworks/models/gpt-oss-20b")
 FW_SECONDARY_MODEL = os.getenv("FW_SECONDARY_MODEL", "accounts/fireworks/models/qwen3-coder-30b-a3b-instruct")
-# HF Router route (must use HF_TOKEN). For OpenAI SDK on HF Router you’d use `...:fireworks-ai`,
-# but with huggingface_hub.InferenceClient+provider we pass the plain HF model id.
-HF_PRIMARY_MODEL   = os.getenv("HF_PRIMARY_MODEL",   "openai/gpt-oss-20b")
+
+# HF Router (Hugging Face token + provider routing)
+# Use huggingface model slugs; they’ll be routed to Fireworks via provider="fireworks-ai"
+HF_PRIMARY_MODEL   = os.getenv("HF_PRIMARY_MODEL",   "fireworks/gpt-oss-20b")
 HF_SECONDARY_MODEL = os.getenv("HF_SECONDARY_MODEL", "Qwen/Qwen3-Coder-30B-A3B-Instruct")
 
-# ---------- Fireworks (OpenAI-compatible) driver ----------
+# ============================== Fireworks (OpenAI-compatible) ==============================
 class FireworksOpenAIChat(BaseChatModel):
     model: str
     api_key: str | None = None
@@ -50,7 +51,6 @@ class FireworksOpenAIChat(BaseChatModel):
 
     def __init__(self, **data):
         super().__init__(**data)
-        # Fireworks OpenAI-compatible endpoint
         self._client = OpenAI(
             base_url=os.getenv("OPENAI_API_BASE", "https://api.fireworks.ai/inference/v1"),
             api_key=self.api_key,
@@ -75,16 +75,15 @@ class FireworksOpenAIChat(BaseChatModel):
             return ChatResult(generations=[gen], llm_output={"error":"no_api_key"})
         try:
             resp = self._client.chat.completions.create(
-                model=self.model,  # e.g., accounts/openai/models/gpt-oss-20b
+                model=self.model,  # e.g., accounts/fireworks/models/gpt-oss-20b
                 messages=self._convert(messages),
                 temperature=kwargs.get("temperature", self.temperature),
                 max_tokens=kwargs.get("max_tokens", self.max_new_tokens),
                 stream=False,
             )
             text = ""
-            if hasattr(resp, "choices") and resp.choices:
+            if getattr(resp, "choices", None):
                 ch = resp.choices[0]
-                # OpenAI SDK v1 returns .message
                 if getattr(ch, "message", None) and getattr(ch.message, "content", None):
                     text = ch.message.content
             gen = ChatGeneration(message=AIMessage(content=text or ""))
@@ -104,7 +103,7 @@ def _heartbeat_fireworks(model_id: str) -> bool:
         log.warning(f"FW heartbeat failed for {model_id}: {type(e).__name__}: {str(e)[:200]}")
         return False
 
-# ---------- HF Router (provider routing) driver ----------
+# ============================== HF Router (provider routing) ==============================
 class HFRouterChat(BaseChatModel):
     model: str
     hf_token: str | None = None
@@ -113,6 +112,7 @@ class HFRouterChat(BaseChatModel):
 
     def __init__(self, **data):
         super().__init__(**data)
+        # Use HF Router to reach Fireworks; requires HF_TOKEN
         self._client = InferenceClient(provider="fireworks-ai", api_key=self.hf_token)
 
     @property
@@ -134,14 +134,14 @@ class HFRouterChat(BaseChatModel):
             return ChatResult(generations=[gen], llm_output={"error":"no_hf_token"})
         try:
             resp = self._client.chat.completions.create(
-                model=self.model,  # e.g., "openai/gpt-oss-20b"
+                model=self.model,  # e.g., "fireworks/gpt-oss-20b"
                 messages=self._convert(messages),
                 stream=False,
                 max_tokens=kwargs.get("max_tokens", self.max_new_tokens),
                 temperature=kwargs.get("temperature", self.temperature),
             )
             text = ""
-            if hasattr(resp, "choices") and resp.choices:
+            if getattr(resp, "choices", None):
                 ch = resp.choices[0]
                 if getattr(ch, "message", None) and getattr(ch.message, "content", None):
                     text = ch.message.content
@@ -164,9 +164,9 @@ def _heartbeat_hf_router(model_id: str) -> bool:
         log.warning(f"HF Router heartbeat failed for {model_id}: {type(e).__name__}: {str(e)[:200]}")
         return False
 
-# ---------- LLM selection ----------
+# ============================== Selection ==============================
 def build_chat_llm():
-    # Prefer direct Fireworks when FW key is present
+    # Prefer direct Fireworks with your Fireworks key
     if FIREWORKS_API_KEY and _heartbeat_fireworks(FW_PRIMARY_MODEL):
         log.info(f"Using Fireworks chat model: {FW_PRIMARY_MODEL}")
         return FireworksOpenAIChat(model=FW_PRIMARY_MODEL, api_key=FIREWORKS_API_KEY)
@@ -174,7 +174,7 @@ def build_chat_llm():
         log.info(f"Using Fireworks fallback chat model: {FW_SECONDARY_MODEL}")
         return FireworksOpenAIChat(model=FW_SECONDARY_MODEL, api_key=FIREWORKS_API_KEY)
 
-    # Else try HF Router (requires HF_TOKEN)
+    # Fallback to HF Router (requires HF_TOKEN)
     if HF_TOKEN and _heartbeat_hf_router(HF_PRIMARY_MODEL):
         log.info(f"Using HF Router chat model: {HF_PRIMARY_MODEL}")
         return HFRouterChat(model=HF_PRIMARY_MODEL, hf_token=HF_TOKEN)
