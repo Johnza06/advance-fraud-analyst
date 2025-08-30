@@ -8,3 +8,4 @@ langchain-community>=0.2
 langchain-huggingface>=0.0.3
 pydantic>=2
 python-dotenv
+openai>=1.43.0
