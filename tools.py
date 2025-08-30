@@ -47,7 +47,7 @@ def sanctions_pep_tool(csv_text: str) -> str:
 class CreditCSVInput(BaseModel):
     csv_text: str = Field(..., description="Credit CSV text")
 
-@tool("credit_risk_tool", args_schema=CreditCSVInput)
+@tool("credit_risk_tool", args_schema=CreditCSVInput, description="Credit risk rules: score<600, utilization>0.8, DTI>0.4, defaults>0, income<30000.")
 def credit_risk_tool(csv_text: str) -> str:
     """Score credit risk using simple rules → risk_score, risk_level. Returns counts + sample."""
     df = _csv_text_to_df(csv_text)

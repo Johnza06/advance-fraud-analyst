@@ -10,7 +10,7 @@ load_dotenv()
 log = logging.getLogger("fraud-analyst")
 logging.basicConfig(level=logging.INFO)
 
-FIREWORKS_API_KEY = os.getenv("FIREWORKS_API_KEY") or os.getenv("HF_TOKEN")
+FIREWORKS_API_KEY = os.getenv("fireworks_api_huggingface") or os.getenv("HF_TOKEN")
 FW_PRIMARY_MODEL   = os.getenv("FW_PRIMARY_MODEL",   "openai/gpt-oss-20b")
 FW_SECONDARY_MODEL = os.getenv("FW_SECONDARY_MODEL", "Qwen/Qwen3-Coder-30B-A3B-Instruct")
 
