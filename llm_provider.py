@@ -1,58 +1,80 @@
 from __future__ import annotations
-import os, time, random, threading, logging
+"""
+llm_provider.py
+- Primary: Fireworks OpenAI-compatible API (chat first, fallback to completions)
+- Secondary: Hugging Face Inference Router (provider="fireworks-ai") if HF_TOKEN present
+- Throttle & retry tuned for demo stability
+"""
+
+import os
+import time
+import random
+import threading
+import logging
+from typing import List
+
 from dotenv import load_dotenv
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain.schema import HumanMessage, SystemMessage, AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
+# Fireworks (OpenAI-compatible)
 from openai import OpenAI
 from openai import RateLimitError, BadRequestError
+
+# HF Router (provider routing)
 from huggingface_hub import InferenceClient
 
 load_dotenv()
 log = logging.getLogger("fraud-analyst")
 logging.basicConfig(level=logging.INFO)
 
+# --------- Public constant used by app.py when LLM is not available ----------
 SUMMARY_NOTICE = "🔌 Please connect to an inference point to generate summary."
 
-def _first_env(*names):
+# --------- Read secrets (support your HF repo secret name) ----------
+def _first_env(*names: List[str]):
     for n in names:
         v = os.getenv(n)
         if v:
             return v
     return None
 
-# ---------- Secrets ----------
 FIREWORKS_API_KEY = _first_env(
-    "fireworks_api_huggingface",
+    "fireworks_api_huggingface",      # your HF Space/Repo secret
     "FIREWORKS_API_HUGGINGFACE",
     "FIREWORKS_API_KEY",
-    "OPENAI_API_KEY",
+    "OPENAI_API_KEY",                 # allow reuse
 )
 HF_TOKEN = _first_env("HF_TOKEN", "HUGGINGFACE_TOKEN")
 
-# ---------- Model IDs ----------
-# Fireworks (OpenAI-compatible)
+# --------- Models ----------
+# Fireworks (use accounts/fireworks path)
 FW_PRIMARY_MODEL   = os.getenv("FW_PRIMARY_MODEL",   "accounts/fireworks/models/gpt-oss-20b")
 FW_SECONDARY_MODEL = os.getenv("FW_SECONDARY_MODEL", "accounts/fireworks/models/qwen3-coder-30b-a3b-instruct")
 
-# HF Router (if you also set HF_TOKEN)
+# Hugging Face Router IDs (plain slugs)
 HF_PRIMARY_MODEL   = os.getenv("HF_PRIMARY_MODEL",   "fireworks/gpt-oss-20b")
 HF_SECONDARY_MODEL = os.getenv("HF_SECONDARY_MODEL", "Qwen/Qwen3-Coder-30B-A3B-Instruct")
 
-# ---------- Throttle / Retry ----------
-MAX_NEW_TOKENS   = int(os.getenv("LLM_MAX_NEW_TOKENS", "128"))
+# --------- Throttle / Retry knobs (tuned for demo stability) ----------
+MAX_NEW_TOKENS   = int(os.getenv("LLM_MAX_NEW_TOKENS", "96"))
 TEMP             = float(os.getenv("LLM_TEMPERATURE", "0.2"))
-MAX_RETRIES      = int(os.getenv("LLM_MAX_RETRIES", "3"))
-MIN_INTERVAL_S   = float(os.getenv("LLM_MIN_INTERVAL_S", "0.25"))
+MAX_RETRIES      = int(os.getenv("LLM_MAX_RETRIES", "2"))
+MIN_INTERVAL_S   = float(os.getenv("LLM_MIN_INTERVAL_S", "1.0"))
 MAX_CONCURRENCY  = int(os.getenv("LLM_MAX_CONCURRENCY", "1"))
 
+# Ensure OpenAI SDK itself doesn't add extra retries
+os.environ.setdefault("OPENAI_MAX_RETRIES", "0")
+
+# Global throttle across all instances
 _CALL_LOCK = threading.BoundedSemaphore(MAX_CONCURRENCY)
 _last_call_ts = 0.0
 _ts_lock = threading.Lock()
 
 def _pace():
+    """Global pacing to avoid hitting 429 on demo plans."""
     global _last_call_ts
     with _ts_lock:
         now = time.monotonic()
@@ -65,24 +87,23 @@ def _with_retries(fn):
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             return fn()
-        except RateLimitError as e:
+        except RateLimitError:
             if attempt >= MAX_RETRIES:
                 raise
-            # jittered backoff
-            time.sleep(0.5 * attempt + random.random() * 0.4)
+            time.sleep(0.6 * attempt + random.random() * 0.5)
         except Exception:
             if attempt >= MAX_RETRIES:
                 raise
-            time.sleep(0.3 * attempt)
+            time.sleep(0.4 * attempt)
 
-# ============================== Fireworks via OpenAI SDK ==============================
+# ========================== Fireworks (OpenAI-compatible) ==========================
 FW_BASE = os.getenv("OPENAI_API_BASE", "https://api.fireworks.ai/inference/v1")
 
+class _ChatIncompatible(Exception):
+    """Raise to switch a model to /completions pathway (e.g., gpt-oss-20b)."""
+
 class FireworksOpenAIChat(BaseChatModel):
-    """
-    Primary driver: uses Fireworks /chat/completions.
-    If the model errors as chat-incompatible, we raise a sentinel to try the completion driver.
-    """
+    """Normal chat.completions driver."""
     model: str
     api_key: str | None = None
     temperature: float = TEMP
@@ -107,8 +128,8 @@ class FireworksOpenAIChat(BaseChatModel):
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
         if not self.api_key:
-            gen = ChatGeneration(message=AIMessage(content=""))
-            return ChatResult(generations=[gen], llm_output={"error":"no_api_key"})
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=""))],
+                              llm_output={"error": "no_api_key"})
         def _call():
             with _CALL_LOCK:
                 _pace()
@@ -126,30 +147,22 @@ class FireworksOpenAIChat(BaseChatModel):
                 ch = resp.choices[0]
                 if getattr(ch, "message", None) and getattr(ch.message, "content", None):
                     text = ch.message.content
-            gen = ChatGeneration(message=AIMessage(content=text or ""))
-            return ChatResult(generations=[gen], llm_output={"model": self.model})
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=text or ""))],
+                              llm_output={"model": self.model, "endpoint": "chat"})
         except BadRequestError as e:
-            # Known symptom for models that prefer /completions:
-            # "Failed to format non-streaming choice: Unexpected EOS while waiting for..."
-            msg = str(e)
-            if "Failed to format non-streaming choice" in msg or "invalid_request_error" in msg:
+            # Fireworks returns this when a model is not chat-friendly.
+            if "Failed to format non-streaming choice" in str(e) or "invalid_request_error" in str(e):
                 raise _ChatIncompatible()
-            log.warning(f"FW chat BadRequest for {self.model}: {msg[:200]}")
-            gen = ChatGeneration(message=AIMessage(content=""))
-            return ChatResult(generations=[gen], llm_output={"error": msg})
+            log.warning(f"FW chat BadRequest for {self.model}: {str(e)[:200]}")
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=""))],
+                              llm_output={"error": str(e)})
         except Exception as e:
             log.warning(f"FW chat failed for {self.model}: {type(e).__name__}: {str(e)[:200]}")
-            gen = ChatGeneration(message=AIMessage(content=""))
-            return ChatResult(generations=[gen], llm_output={"error": str(e)})
-
-class _ChatIncompatible(Exception):
-    pass
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=""))],
+                              llm_output={"error": str(e)})
 
 class FireworksOpenAICompletionChat(BaseChatModel):
-    """
-    Fallback driver: uses Fireworks /completions and wraps it as a chat model.
-    Works for models like gpt-oss-20b that may not behave with chat-completions.
-    """
+    """Wrap /completions as a chat model (robust for gpt-oss-20b)."""
     model: str
     api_key: str | None = None
     temperature: float = TEMP
@@ -164,7 +177,6 @@ class FireworksOpenAICompletionChat(BaseChatModel):
         return "fireworks_openai_completion_chat"
 
     def _to_prompt(self, messages) -> str:
-        # Simple, robust conversion to a prompt
         parts=[]
         for m in messages:
             if isinstance(m, SystemMessage):
@@ -180,8 +192,8 @@ class FireworksOpenAICompletionChat(BaseChatModel):
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
         if not self.api_key:
-            gen = ChatGeneration(message=AIMessage(content=""))
-            return ChatResult(generations=[gen], llm_output={"error":"no_api_key"})
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=""))],
+                              llm_output={"error": "no_api_key"})
         prompt = self._to_prompt(messages)
         def _call():
             with _CALL_LOCK:
@@ -199,29 +211,31 @@ class FireworksOpenAICompletionChat(BaseChatModel):
                 ch = resp.choices[0]
                 if getattr(ch, "text", None):
                     text = ch.text
-            gen = ChatGeneration(message=AIMessage(content=text or ""))
-            return ChatResult(generations=[gen], llm_output={"model": self.model, "endpoint":"completions"})
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=text or ""))],
+                              llm_output={"model": self.model, "endpoint": "completions"})
         except Exception as e:
             log.warning(f"FW completion failed for {self.model}: {type(e).__name__}: {str(e)[:200]}")
-            gen = ChatGeneration(message=AIMessage(content=""))
-            return ChatResult(generations=[gen], llm_output={"error": str(e)})
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=""))],
+                              llm_output={"error": str(e)})
 
 def _heartbeat_fw_chat(model_id: str) -> bool:
-    if not FIREWORKS_API_KEY: return False
+    if not FIREWORKS_API_KEY:
+        return False
     try:
         cli = OpenAI(base_url=FW_BASE, api_key=FIREWORKS_API_KEY, max_retries=0)
         _ = cli.chat.completions.create(model=model_id, messages=[{"role":"user","content":"ping"}], max_tokens=1)
         return True
     except BadRequestError as e:
-        # Treat as chat-incompatible but alive
+        # chat-incompatible → let caller try completions heartbeat
         if "Failed to format non-streaming choice" in str(e) or "invalid_request_error" in str(e):
-            return False  # signal to try completion heartbeat
+            return False
         return False
     except Exception:
         return False
 
 def _heartbeat_fw_completion(model_id: str) -> bool:
-    if not FIREWORKS_API_KEY: return False
+    if not FIREWORKS_API_KEY:
+        return False
     try:
         cli = OpenAI(base_url=FW_BASE, api_key=FIREWORKS_API_KEY, max_retries=0)
         _ = cli.completions.create(model=model_id, prompt="ping", max_tokens=1)
@@ -229,7 +243,7 @@ def _heartbeat_fw_completion(model_id: str) -> bool:
     except Exception:
         return False
 
-# ============================== HF Router (provider routing) ==============================
+# ========================== HF Router (provider="fireworks-ai") ==========================
 class HFRouterChat(BaseChatModel):
     model: str
     hf_token: str | None = None
@@ -238,6 +252,7 @@ class HFRouterChat(BaseChatModel):
 
     def __init__(self, **data):
         super().__init__(**data)
+        # This reaches Fireworks through HF Router. Needs HF_TOKEN.
         self._client = InferenceClient(provider="fireworks-ai", api_key=self.hf_token)
 
     @property
@@ -255,13 +270,13 @@ class HFRouterChat(BaseChatModel):
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
         if not self.hf_token:
-            gen = ChatGeneration(message=AIMessage(content=""))
-            return ChatResult(generations=[gen], llm_output={"error":"no_hf_token"})
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=""))],
+                              llm_output={"error":"no_hf_token"})
         def _call():
             with _CALL_LOCK:
                 _pace()
                 return self._client.chat.completions.create(
-                    model=self.model,
+                    model=self.model,  # e.g. "fireworks/gpt-oss-20b"
                     messages=self._convert(messages),
                     stream=False,
                     max_tokens=kwargs.get("max_tokens", self.max_new_tokens),
@@ -276,15 +291,16 @@ class HFRouterChat(BaseChatModel):
                     text = ch.message.content
                 elif getattr(ch, "text", None):
                     text = ch.text
-            gen = ChatGeneration(message=AIMessage(content=text or ""))
-            return ChatResult(generations=[gen], llm_output={"model": self.model})
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=text or ""))],
+                              llm_output={"model": self.model})
         except Exception as e:
             log.warning(f"HF Router call failed for {self.model}: {type(e).__name__}: {str(e)[:200]}")
-            gen = ChatGeneration(message=AIMessage(content=""))
-            return ChatResult(generations=[gen], llm_output={"error": str(e)})
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=""))],
+                              llm_output={"error": str(e)})
 
 def _heartbeat_hf_router(model_id: str) -> bool:
-    if not HF_TOKEN: return False
+    if not HF_TOKEN:
+        return False
     try:
         cli = InferenceClient(provider="fireworks-ai", api_key=HF_TOKEN)
         _ = cli.chat.completions.create(model=model_id, messages=[{"role":"user","content":"ping"}], stream=False, max_tokens=1)
@@ -292,11 +308,11 @@ def _heartbeat_hf_router(model_id: str) -> bool:
     except Exception:
         return False
 
-# ============================== Selection ==============================
+# =============================== Selection ===============================
 def build_chat_llm():
     # Prefer Fireworks direct
     if FIREWORKS_API_KEY:
-        # Try chat first; if that fails, try completion wrapper
+        # Try primary as chat, then completions
         if _heartbeat_fw_chat(FW_PRIMARY_MODEL):
             log.info(f"Using Fireworks chat model: {FW_PRIMARY_MODEL}")
             return FireworksOpenAIChat(model=FW_PRIMARY_MODEL, api_key=FIREWORKS_API_KEY)
@@ -304,7 +320,7 @@ def build_chat_llm():
             log.info(f"Using Fireworks COMPLETION-wrapped model: {FW_PRIMARY_MODEL}")
             return FireworksOpenAICompletionChat(model=FW_PRIMARY_MODEL, api_key=FIREWORKS_API_KEY)
 
-        # Secondary
+        # Secondary chain
         if _heartbeat_fw_chat(FW_SECONDARY_MODEL):
             log.info(f"Using Fireworks chat model (fallback): {FW_SECONDARY_MODEL}")
             return FireworksOpenAIChat(model=FW_SECONDARY_MODEL, api_key=FIREWORKS_API_KEY)
@@ -312,7 +328,7 @@ def build_chat_llm():
             log.info(f"Using Fireworks COMPLETION-wrapped model (fallback): {FW_SECONDARY_MODEL}")
             return FireworksOpenAICompletionChat(model=FW_SECONDARY_MODEL, api_key=FIREWORKS_API_KEY)
 
-    # HF Router fallback
+    # Else try HF Router (requires HF_TOKEN)
     if HF_TOKEN and _heartbeat_hf_router(HF_PRIMARY_MODEL):
         log.info(f"Using HF Router chat model: {HF_PRIMARY_MODEL}")
         return HFRouterChat(model=HF_PRIMARY_MODEL, hf_token=HF_TOKEN)
@@ -323,4 +339,5 @@ def build_chat_llm():
     log.warning("No working chat model; notice will be shown.")
     return None
 
+# Singleton used by app.py and agent.py
 CHAT_LLM = build_chat_llm()
